@@ -32,10 +32,13 @@ spec:
         image: vllm/vllm-openai:nightly-dev-x86_64-cu130-ac9126e58aa7
         imagePullPolicy: IfNotPresent
         securityContext:
+          privileged: true
           capabilities:
             add: ["IPC_LOCK", "SYS_RESOURCE"]
         command: ["/bin/bash", "-c"]
         env:
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3"
         - name: NCCL_NET_PLUGIN
           value: "none"
         - name: NCCL_TUNER_PLUGIN
@@ -55,7 +58,7 @@ spec:
         - name: MOONCAKE_CONFIG_PATH
           value: "/tmp/mooncake_vllm_config.json"
         - name: MOONCAKE_OFFLOAD_FILE_STORAGE_PATH
-          value: "/mnt/lustre_1000mbps/mooncake_kv_cache"
+          value: "/mnt/lustre_1000mbps/mooncake_vllm_kv_cache"
         args:
         - |
           set -euo pipefail
@@ -63,13 +66,11 @@ spec:
           export VLLM_USE_V2_MODEL_RUNNER=1
           export VLLM_USE_RUST_FRONTEND=1
           export PYTHONUNBUFFERED=1
-          mkdir -p /mnt/lustre_1000mbps/mooncake_kv_cache
-          cat <<'EOF' > /tmp/mooncake_vllm_config.json
-{"mode": "standalone-store", "metadata_server": "P2PHANDSHAKE", "master_server_address": "llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051", "global_segment_size": "0GB", "local_buffer_size": "4GB", "protocol": "rdma", "device_name": "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7", "enable_offload": true}
-EOF
-          nohup mooncake_master -rpc_port=50051 -rpc_thread_num=8 -default_kv_lease_ttl=30000 -eviction_high_watermark_ratio=0.95 -eviction_ratio=0.1 -enable_offload=true -enable_disk_eviction=true -root_fs_dir=/mnt/lustre_1000mbps/mooncake_kv_cache -logtostderr > /tmp/mooncake_master.log 2>&1 < /dev/null &
+          mkdir -p /mnt/lustre_1000mbps/mooncake_vllm_kv_cache
+          echo '{"mode": "standalone-store", "metadata_server": "P2PHANDSHAKE", "master_server_address": "llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051", "global_segment_size": "0GB", "local_buffer_size": "4GB", "protocol": "rdma", "device_name": "mlx5_0,mlx5_1,mlx5_2,mlx5_3", "enable_offload": true}' > /tmp/mooncake_vllm_config.json
+          nohup mooncake_master -rpc_port=50051 -rpc_thread_num=8 -default_kv_lease_ttl=30000 -eviction_high_watermark_ratio=0.95 -eviction_ratio=0.1 -enable_offload=true -enable_disk_eviction=true -root_fs_dir=/mnt/lustre_1000mbps/mooncake_vllm_kv_cache -logtostderr > /tmp/mooncake_master.log 2>&1 < /dev/null &
           sleep 1
-          MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/mnt/lustre_1000mbps/mooncake_kv_cache nohup mooncake_client -host=127.0.0.1 -port=50052 -global_segment_size='64GB' -local_buffer_size='4GB' -metadata_server='P2PHANDSHAKE' -master_server_address='llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051' -protocol='rdma' -device_names='mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7' -enable_offload=true -start_offload_rpc_server=true -logtostderr > /tmp/mooncake_client.log 2>&1 < /dev/null &
+          MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/mnt/lustre_1000mbps/mooncake_vllm_kv_cache nohup mooncake_client -host=127.0.0.1 -port=50052 -global_segment_size='64GB' -local_buffer_size='4GB' -metadata_server='P2PHANDSHAKE' -master_server_address='llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051' -protocol='rdma' -device_names='mlx5_0,mlx5_1,mlx5_2,mlx5_3' -enable_offload=true -start_offload_rpc_server=true -logtostderr > /tmp/mooncake_client.log 2>&1 < /dev/null &
           if [ -d /mnt/lustre_1000mbps/vllm_kernel_cache/w1/cache ]; then
             echo "Restoring pre-compiled vLLM FlashInfer/Triton/torch.compile kernels from Lustre..."
             mkdir -p /root/.cache
@@ -94,7 +95,7 @@ EOF
             --max-cudagraph-capture-size 8190 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 256 \
-            --gpu-memory-utilization 0.97 \
+            --gpu-memory-utilization 0.92 \
             --enable-prompt-tokens-details \
             --disable-uvicorn-access-log \
             --trust-remote-code \
@@ -191,10 +192,13 @@ spec:
         image: vllm/vllm-openai:nightly-dev-x86_64-cu130-ac9126e58aa7
         imagePullPolicy: IfNotPresent
         securityContext:
+          privileged: true
           capabilities:
             add: ["IPC_LOCK", "SYS_RESOURCE"]
         command: ["/bin/bash", "-c"]
         env:
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3"
         - name: NCCL_NET_PLUGIN
           value: "none"
         - name: NCCL_TUNER_PLUGIN
@@ -214,7 +218,7 @@ spec:
         - name: MOONCAKE_CONFIG_PATH
           value: "/tmp/mooncake_vllm_config.json"
         - name: MOONCAKE_OFFLOAD_FILE_STORAGE_PATH
-          value: "/mnt/lustre_1000mbps/mooncake_kv_cache"
+          value: "/mnt/lustre_1000mbps/mooncake_vllm_kv_cache"
         args:
         - |
           set -euo pipefail
@@ -222,11 +226,9 @@ spec:
           export VLLM_USE_V2_MODEL_RUNNER=1
           export VLLM_USE_RUST_FRONTEND=1
           export PYTHONUNBUFFERED=1
-          mkdir -p /mnt/lustre_1000mbps/mooncake_kv_cache
-          cat <<'EOF' > /tmp/mooncake_vllm_config.json
-{"mode": "standalone-store", "metadata_server": "P2PHANDSHAKE", "master_server_address": "llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051", "global_segment_size": "0GB", "local_buffer_size": "4GB", "protocol": "rdma", "device_name": "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7", "enable_offload": true}
-EOF
-          MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/mnt/lustre_1000mbps/mooncake_kv_cache nohup mooncake_client -host=127.0.0.1 -port=50052 -global_segment_size='64GB' -local_buffer_size='4GB' -metadata_server='P2PHANDSHAKE' -master_server_address='llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051' -protocol='rdma' -device_names='mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7' -enable_offload=true -start_offload_rpc_server=true -logtostderr > /tmp/mooncake_client.log 2>&1 < /dev/null &
+          mkdir -p /mnt/lustre_1000mbps/mooncake_vllm_kv_cache
+          echo '{"mode": "standalone-store", "metadata_server": "P2PHANDSHAKE", "master_server_address": "llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051", "global_segment_size": "0GB", "local_buffer_size": "4GB", "protocol": "rdma", "device_name": "mlx5_0,mlx5_1,mlx5_2,mlx5_3", "enable_offload": true}' > /tmp/mooncake_vllm_config.json
+          MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/mnt/lustre_1000mbps/mooncake_vllm_kv_cache nohup mooncake_client -host=127.0.0.1 -port=50052 -global_segment_size='64GB' -local_buffer_size='4GB' -metadata_server='P2PHANDSHAKE' -master_server_address='llmd-vllm-w1.ubench-llmd.svc.cluster.local:50051' -protocol='rdma' -device_names='mlx5_0,mlx5_1,mlx5_2,mlx5_3' -enable_offload=true -start_offload_rpc_server=true -logtostderr > /tmp/mooncake_client.log 2>&1 < /dev/null &
           if [ -d /mnt/lustre_1000mbps/vllm_kernel_cache/w2/cache ]; then
             echo "Restoring pre-compiled vLLM FlashInfer/Triton/torch.compile kernels from Lustre..."
             mkdir -p /root/.cache
@@ -251,7 +253,7 @@ EOF
             --max-cudagraph-capture-size 8190 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 256 \
-            --gpu-memory-utilization 0.97 \
+            --gpu-memory-utilization 0.92 \
             --enable-prompt-tokens-details \
             --disable-uvicorn-access-log \
             --trust-remote-code \

@@ -52,22 +52,10 @@ spec:
           value: "match-expected"
         - name: SGLANG_SIMULATE_ACC_TOKEN_MODE
           value: "real-draft-token"
-        - name: MOONCAKE_PROTOCOL
-          value: "rdma"
-        - name: MOONCAKE_DEVICE
-          value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
-        - name: MOONCAKE_MASTER
-          value: "dynamo-sglang-w1.ubench-llmd.svc.cluster.local:50051"
-        - name: MOONCAKE_GLOBAL_SEGMENT_SIZE
-          value: "68719476736"
-        - name: MOONCAKE_LOCAL_BUFFER_SIZE
-          value: "4294967296"
-        - name: MOONCAKE_METADATA_SERVER
-          value: "P2PHANDSHAKE"
-        - name: MOONCAKE_ENABLE_SSD_OFFLOAD
+        - name: SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR
+          value: "/mnt/lustre_1000mbps/sglang_hicache/shared"
+        - name: SGLANG_HICACHE_FILE_BACKEND_ENABLE_METADATA_CACHE
           value: "1"
-        - name: MOONCAKE_OFFLOAD_FILE_STORAGE_PATH
-          value: "/mnt/lustre_1000mbps/mooncake_kv_cache"
         - name: UCX_NET_DEVICES
           value: "all"
         args:
@@ -77,16 +65,26 @@ spec:
           export PYTHONNOUSERSITE=1
           export PYTHONUNBUFFERED=1
           export SGLANG_TIMEOUT_KEEP_ALIVE=900
-          mkdir -p /mnt/lustre_1000mbps/mooncake_kv_cache
-          nohup mooncake_master -rpc_port=50051 -rpc_thread_num=8 -default_kv_lease_ttl=30000 -eviction_high_watermark_ratio=0.95 -eviction_ratio=0.1 -enable_offload=true -enable_disk_eviction=true -root_fs_dir=/mnt/lustre_1000mbps/mooncake_kv_cache -logtostderr > /tmp/mooncake_master.log 2>&1 < /dev/null &
-          sleep 1
-          nohup MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/mnt/lustre_1000mbps/mooncake_kv_cache mooncake_client -host=127.0.0.1 -port=50052 -global_segment_size='64GB' -local_buffer_size='4GB' -metadata_server='P2PHANDSHAKE' -master_server_address='dynamo-sglang-w1.ubench-llmd.svc.cluster.local:50051' -protocol='rdma' -device_names='mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7' -enable_offload=true -start_offload_rpc_server=true -logtostderr > /tmp/mooncake_client.log 2>&1 < /dev/null &
+          mkdir -p /mnt/lustre_1000mbps/sglang_hicache/shared
           if [ -d /mnt/lustre_1000mbps/sglang_kernel_cache/w1/sglang ]; then
             echo "Restoring pre-compiled SGLang FlashInfer/Triton/CuteDSL kernels from Lustre..."
             mkdir -p /root/.cache
             cp -rn /mnt/lustre_1000mbps/sglang_kernel_cache/w1/sglang /root/.cache/ || true
           fi
-          echo "Starting Upgraded Upstream Recipe SGLang Worker w1 (TP=8, EP=8, mode=stage5_mooncake_lustre, RDMA enabled)..."
+          EXTRA_ARGS=$(python3 - << 'PYEOF'
+          from sglang.srt.server_args import prepare_server_args
+          base = ["--trust-remote-code","--model-path","/mnt/lustre_1000mbps/models/zai-org/GLM-5.3","--served-model-name","zai-org/GLM-5.3","--tp","8","--ep-size","8","--dp-size","8","--enable-dp-attention","--moe-a2a-backend","deepep","--speculative-algorithm","EAGLE","--speculative-num-steps","1","--speculative-eagle-topk","1","--speculative-num-draft-tokens","2","--mem-fraction-static","0.84","--chunked-prefill-size","32768","--max-running-requests","256","--enable-hierarchical-cache","--hicache-ratio","1.2","--hicache-size","0","--hicache-mem-layout","page_first","--hicache-io-backend","kernel","--hicache-write-policy","write_through","--hicache-storage-backend","file","--hicache-storage-prefetch-policy","wait_complete"]
+          chosen = []
+          for cand in [["--tokenizer-worker-num","8"],["--enable-dp-lm-head"],["--bf16-gemm-backend","cutedsl"]]:
+              try:
+                  prepare_server_args(base + chosen + cand)
+                  chosen.extend(cand)
+              except Exception:
+                  pass
+          print(" ".join(chosen))
+          PYEOF
+          )
+          echo "Starting Upgraded Upstream Recipe SGLang Worker w1 (TP=8, EP=8, extra=[$EXTRA_ARGS], mode=stage5_lustre, RDMA enabled)..."
           exec sglang serve \
             --trust-remote-code \
             --model-path /mnt/lustre_1000mbps/models/zai-org/GLM-5.3 \
@@ -100,9 +98,10 @@ spec:
             --speculative-num-steps 1 \
             --speculative-eagle-topk 1 \
             --speculative-num-draft-tokens 2 \
-            --mem-fraction-static 0.85 \
+            --mem-fraction-static 0.84 \
             --chunked-prefill-size 32768 \
             --max-running-requests 256 \
+            $EXTRA_ARGS \
             --host 0.0.0.0 \
             --port 8888 \
             --enable-metrics \
@@ -111,11 +110,12 @@ spec:
             --enable-hierarchical-cache \
             --hicache-ratio 1.2 \
             --hicache-size 0 \
-            --hicache-mem-layout page_first_direct \
-            --hicache-io-backend direct \
+            --hicache-mem-layout page_first \
+            --hicache-io-backend kernel \
             --hicache-write-policy write_through \
-            --hicache-storage-backend mooncake \
-            --hicache-storage-prefetch-policy wait_complete
+            --hicache-storage-backend file \
+            --hicache-storage-prefetch-policy wait_complete \
+            --hicache-storage-backend-extra-config '{"enable_metadata_cache":true,"metadata_ttl":3600}'
         ports:
         - containerPort: 8888
           name: http
@@ -228,22 +228,10 @@ spec:
           value: "match-expected"
         - name: SGLANG_SIMULATE_ACC_TOKEN_MODE
           value: "real-draft-token"
-        - name: MOONCAKE_PROTOCOL
-          value: "rdma"
-        - name: MOONCAKE_DEVICE
-          value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
-        - name: MOONCAKE_MASTER
-          value: "dynamo-sglang-w1.ubench-llmd.svc.cluster.local:50051"
-        - name: MOONCAKE_GLOBAL_SEGMENT_SIZE
-          value: "68719476736"
-        - name: MOONCAKE_LOCAL_BUFFER_SIZE
-          value: "4294967296"
-        - name: MOONCAKE_METADATA_SERVER
-          value: "P2PHANDSHAKE"
-        - name: MOONCAKE_ENABLE_SSD_OFFLOAD
+        - name: SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR
+          value: "/mnt/lustre_1000mbps/sglang_hicache/shared"
+        - name: SGLANG_HICACHE_FILE_BACKEND_ENABLE_METADATA_CACHE
           value: "1"
-        - name: MOONCAKE_OFFLOAD_FILE_STORAGE_PATH
-          value: "/mnt/lustre_1000mbps/mooncake_kv_cache"
         - name: UCX_NET_DEVICES
           value: "all"
         args:
@@ -253,14 +241,26 @@ spec:
           export PYTHONNOUSERSITE=1
           export PYTHONUNBUFFERED=1
           export SGLANG_TIMEOUT_KEEP_ALIVE=900
-          mkdir -p /mnt/lustre_1000mbps/mooncake_kv_cache
-          nohup MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/mnt/lustre_1000mbps/mooncake_kv_cache mooncake_client -host=127.0.0.1 -port=50052 -global_segment_size='64GB' -local_buffer_size='4GB' -metadata_server='P2PHANDSHAKE' -master_server_address='dynamo-sglang-w1.ubench-llmd.svc.cluster.local:50051' -protocol='rdma' -device_names='mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7' -enable_offload=true -start_offload_rpc_server=true -logtostderr > /tmp/mooncake_client.log 2>&1 < /dev/null &
+          mkdir -p /mnt/lustre_1000mbps/sglang_hicache/shared
           if [ -d /mnt/lustre_1000mbps/sglang_kernel_cache/w2/sglang ]; then
             echo "Restoring pre-compiled SGLang FlashInfer/Triton/CuteDSL kernels from Lustre..."
             mkdir -p /root/.cache
             cp -rn /mnt/lustre_1000mbps/sglang_kernel_cache/w2/sglang /root/.cache/ || true
           fi
-          echo "Starting Upgraded Upstream Recipe SGLang Worker w2 (TP=8, EP=8, mode=stage5_mooncake_lustre, RDMA enabled)..."
+          EXTRA_ARGS=$(python3 - << 'PYEOF'
+          from sglang.srt.server_args import prepare_server_args
+          base = ["--trust-remote-code","--model-path","/mnt/lustre_1000mbps/models/zai-org/GLM-5.3","--served-model-name","zai-org/GLM-5.3","--tp","8","--ep-size","8","--dp-size","8","--enable-dp-attention","--moe-a2a-backend","deepep","--speculative-algorithm","EAGLE","--speculative-num-steps","1","--speculative-eagle-topk","1","--speculative-num-draft-tokens","2","--mem-fraction-static","0.84","--chunked-prefill-size","32768","--max-running-requests","256","--enable-hierarchical-cache","--hicache-ratio","1.2","--hicache-size","0","--hicache-mem-layout","page_first","--hicache-io-backend","kernel","--hicache-write-policy","write_through","--hicache-storage-backend","file","--hicache-storage-prefetch-policy","wait_complete"]
+          chosen = []
+          for cand in [["--tokenizer-worker-num","8"],["--enable-dp-lm-head"],["--bf16-gemm-backend","cutedsl"]]:
+              try:
+                  prepare_server_args(base + chosen + cand)
+                  chosen.extend(cand)
+              except Exception:
+                  pass
+          print(" ".join(chosen))
+          PYEOF
+          )
+          echo "Starting Upgraded Upstream Recipe SGLang Worker w2 (TP=8, EP=8, extra=[$EXTRA_ARGS], mode=stage5_lustre, RDMA enabled)..."
           exec sglang serve \
             --trust-remote-code \
             --model-path /mnt/lustre_1000mbps/models/zai-org/GLM-5.3 \
@@ -274,9 +274,10 @@ spec:
             --speculative-num-steps 1 \
             --speculative-eagle-topk 1 \
             --speculative-num-draft-tokens 2 \
-            --mem-fraction-static 0.85 \
+            --mem-fraction-static 0.84 \
             --chunked-prefill-size 32768 \
             --max-running-requests 256 \
+            $EXTRA_ARGS \
             --host 0.0.0.0 \
             --port 8888 \
             --enable-metrics \
@@ -285,11 +286,12 @@ spec:
             --enable-hierarchical-cache \
             --hicache-ratio 1.2 \
             --hicache-size 0 \
-            --hicache-mem-layout page_first_direct \
-            --hicache-io-backend direct \
+            --hicache-mem-layout page_first \
+            --hicache-io-backend kernel \
             --hicache-write-policy write_through \
-            --hicache-storage-backend mooncake \
-            --hicache-storage-prefetch-policy wait_complete
+            --hicache-storage-backend file \
+            --hicache-storage-prefetch-policy wait_complete \
+            --hicache-storage-backend-extra-config '{"enable_metadata_cache":true,"metadata_ttl":3600}'
         ports:
         - containerPort: 8888
           name: http

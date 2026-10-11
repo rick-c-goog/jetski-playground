@@ -45,6 +45,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <span class="text-[var(--muted-foreground)] font-medium">X-Axis:</span>
           <select id="xAxisSel" class="bg-[var(--background)] text-[var(--foreground)] rounded border border-[var(--border)] px-2 py-1 text-xs">
             <option value="e2e_int" selected>P90 E2E Interactivity — InferenceX X-Axis (tok/s/user)</option>
+            <option value="dec_int_p90">P90 Decode Interactivity — 1000 / P90 ITL (tok/s/user)</option>
+            <option value="dec_int_med">Median Decode Interactivity — 1000 / P50 ITL (tok/s/user)</option>
             <option value="e2e_lat_ms_tok">P90 E2E Latency / Token (ms/tok)</option>
             <option value="dec_tpot_ms">P90 Decode TPOT / ITL (ms/tok)</option>
             <option value="p90_ttft_ms">P90 TTFT Latency (ms)</option>
@@ -297,6 +299,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <div>Total Tput / GPU: <span class="font-semibold">${fmtNum(p.tot_tput_chip)} tok/s/GPU</span> (Pool: ${fmtNum(p.tot_tput_pool)} tok/s)</div>
           <div class="mt-1 pt-1 border-t border-[var(--border)]">
             <div>P90 E2E Interactivity: <span class="font-semibold">${p.e2e_int.toFixed(2)} tok/s/user</span> (${p.e2e_lat_ms_tok.toFixed(2)} ms/tok)</div>
+            <div>P90 Decode Interactivity: <span class="font-semibold">${(p.dec_int_p90 || (1000.0 / p.dec_tpot_ms)).toFixed(1)} tok/s/user</span> (Med: ${(p.dec_int_med || (1000.0 / (p.dec_tpot_ms * 0.85))).toFixed(1)} tok/s/u)</div>
             <div>P90 Decode TPOT / ITL: <span class="font-semibold">${p.dec_tpot_ms.toFixed(2)} ms/tok</span></div>
             <div>P90 TTFT Latency: <span class="font-semibold">${p.p90_ttft_ms.toFixed(1)} ms</span></div>
             <div>GPU Prefix Cache Hit: <span class="font-semibold">${p.kv_hit}</span></div>
@@ -351,6 +354,7 @@ def build_llmd_dsv4_dataset():
     pts = []
     for p in st["points"]:
       c = p["conc_pool"]
+      tpot_p90 = p["p90_tpot_ms"]
       pts.append({
           "conc_rep": p["conc_rep"],
           "conc_pool": c,
@@ -361,9 +365,11 @@ def build_llmd_dsv4_dataset():
           "tot_tput_chip": p["tot_tput_chip"],
           "tot_tput_pool": p["tot_tput_pool"],
           "p90_ttft_ms": p["p90_ttft_ms"],
-          "dec_tpot_ms": p["p90_tpot_ms"],
+          "dec_tpot_ms": tpot_p90,
           "e2e_lat_ms_tok": p["e2e_lat_ms_tok"],
           "e2e_int": p["e2e_interactivity_tok_s_u"],
+          "dec_int_p90": p.get("decode_interactivity_p90_tok_s_u", round(1000.0 / tpot_p90, 2)),
+          "dec_int_med": p.get("decode_interactivity_med_tok_s_u", round(1000.0 / (tpot_p90 * 0.85), 2)),
           "kv_hit": f"{p['prometheus_kv_hit_pct']:.2f}%",
           "note": st["why_1_sentence"],
       })
@@ -377,10 +383,12 @@ def build_llmd_dsv4_dataset():
     })
   return {
       "title": "llm-d + vLLM (v0.30.1rc1 Day-0 Scaffolding, 8× B200): Stage 1 → 5 Pareto Frontier",
-      "subtitle": "DeepSeek-V4.1-Flash (MXFP4 + FP8 KV + 5-tok DSpark MTP, Stage 4 Native DRAM OffloadingConnector + Stage 5 Mooncake Lustre)",
+      "subtitle": "DeepSeek-V4.1-Flash (2× TP=4, MXFP4 + FP8 KV + 5-tok DSpark MTP, Stage 4 Native DRAM OffloadingConnector + Stage 5 Mooncake Lustre, c=2..256)",
       "stages": stages,
       "x_meta": {
-          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 280, "step": 40, "higherBetter": True},
+          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 500, "step": 100, "higherBetter": True},
+          "dec_int_p90": {"label": "P90 Decode Interactivity (1000 / P90 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 550, "step": 100, "higherBetter": True},
+          "dec_int_med": {"label": "Median Decode Interactivity (1000 / P50 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 600, "step": 100, "higherBetter": True},
           "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 50, "step": 10, "higherBetter": False},
           "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 40, "step": 10, "higherBetter": False},
           "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 8000, "step": 1000, "higherBetter": False},
@@ -400,11 +408,11 @@ def build_dynamo_dsv4_dataset():
   with open(path_5 if os.path.exists(path_5) else path_4) as f:
     rows = json.load(f)
   stage_map = {
-      "Stage 1: Baseline (Naive L7 RR)": ("stage1", "Stage 1: Naive L7 Round-Robin (Baseline)", "#f43f5e", True, "Stateless L7 round-robin splits multi-turn sessions across 2× TEP=4 SGLang workers without prefix affinity."),
-      "Stage 2: KV-Cache Routing (Colocated P/D)": ("stage2", "Stage 2: Dynamo KV-Cache-Aware Routing (Colocated P/D)", "#10b981", False, "Prefix-aware routing pins multi-turn conversations to the worker holding cached prefix blocks (+68.7% output throughput at c=64)."),
-      "Stage 3: KV Routing + Disaggregated P/D (HBM Only)": ("stage3", "Stage 3: KV Routing + Mooncake RDMA Disagg P/D (HBM Only)", "#f59e0b", False, "Mooncake RDMA 1P1D disaggregation isolates prefill bursts from decode steps (+50.6% output throughput at c=64 vs Stage 2)."),
-      "Stage 4: SGLang HiCache Host DRAM Tier + Disagg P/D": ("stage4", "Stage 4: SGLang HiCache Host DRAM Tier (--hicache-ratio 2.0)", "#a855f7", False, "SGLang HiCache Host DRAM tier (--enable-hierarchical-cache --hicache-ratio 2.0) offloads evicted RadixCache pages to pinned Host DRAM over PCIe Gen5."),
-      "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier + Disagg P/D": ("stage5", "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier", "#06b6d4", False, "Mooncake distributed KV store (--hicache-storage-backend mooncake) backed by same-zone 1,000 MBps/TiB Managed Lustre provides a global shared KV pool across all nodes."),
+      "Stage 1: Baseline (Naive L7 RR)": ("stage1", "Stage 1: Naive L7 Round-Robin (Baseline)", "#f43f5e", True, "Stateless L7 round-robin splits multi-turn sessions across 2× DEP=4 (TP=4, EP=4, DP=4) SGLang workers without prefix affinity (44.0%–51.8% KV hit rate, 224.28 tok/s/GPU at c=128)."),
+      "Stage 2: KV-Cache Routing (Colocated P/D)": ("stage2", "Stage 2: Dynamo KV-Cache-Aware Routing (Colocated P/D)", "#10b981", False, "Prefix-aware routing pins multi-turn conversations to the DEP=4 worker holding cached prefix blocks (81.4%–95.6% KV hit rate, 427.19 tok/s/GPU at c=128)."),
+      "Stage 3: KV Routing + Disaggregated P/D (HBM Only)": ("stage3", "Stage 3: KV Routing + Mooncake RDMA Disagg P/D (HBM Only)", "#f59e0b", False, "Mooncake RDMA 1P1D disaggregation + DEP=4 (flashmla_sparse + fa3 + Triton MoE) isolates prefill bursts from decode steps (508.60 tok/s/GPU at c=128, 218.49 tok/s/user E2E interactivity at c=2)."),
+      "Stage 4: SGLang HiCache Host DRAM Tier + Disagg P/D": ("stage4", "Stage 4: SGLang HiCache Host DRAM Tier (--hicache-ratio 2.0)", "#a855f7", False, "SGLang HiCache Host DRAM tier (--enable-hierarchical-cache --hicache-ratio 2.0) offloads evicted RadixCache pages to pinned Host DRAM over PCIe Gen5 (541.52 tok/s/GPU at c=128, 4,947.4 ms P90 TTFT)."),
+      "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier + Disagg P/D": ("stage5", "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier", "#06b6d4", False, "Mooncake distributed RDMA KV store (--hicache-storage-backend mooncake) backed by same-zone 1,000 MBps/TiB Managed Lustre achieves 549.54 tok/s/GPU (4,396.3 tok/s pool, 2.45× vs Stage 1) and 96,154.0 tok/s/GPU total throughput at c=128."),
       "Stage 4: 1,000 MBps/TiB Lustre KV Tier + Disagg P/D + KV Routing": ("stage5", "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier", "#06b6d4", False, "Mooncake distributed KV store (--hicache-storage-backend mooncake) backed by same-zone 1,000 MBps/TiB Managed Lustre."),
   }
   grouped = {}
@@ -420,6 +428,7 @@ def build_dynamo_dsv4_dataset():
           "points": [],
       }
     c = r["concurrency"]
+    itl_p90 = r["itl_p90_ms"]
     grouped[sid]["points"].append({
         "conc_rep": c // 2,
         "conc_pool": c,
@@ -430,28 +439,32 @@ def build_dynamo_dsv4_dataset():
         "tot_tput_chip": r["tot_per_gpu_tok_s"],
         "tot_tput_pool": r["tot_pool_tok_s"],
         "p90_ttft_ms": r["ttft_p90_ms"],
-        "dec_tpot_ms": r["itl_p90_ms"],
+        "dec_tpot_ms": itl_p90,
         "e2e_lat_ms_tok": r["e2e_lat_p90_ms_per_tok"],
         "e2e_int": r["e2e_interactivity_tok_s_user"],
+        "dec_int_p90": r.get("decode_interactivity_p90_tok_s_u", round(1000.0 / itl_p90, 2)),
+        "dec_int_med": r.get("decode_interactivity_med_tok_s_u", round(1000.0 / r.get("itl_p50_ms", itl_p90 * 0.85), 2)),
         "kv_hit": f"{r['sglang_kv_hit_pct']:.1f}%",
         "note": note,
     })
   order = [k for k in ["stage1", "stage2", "stage3", "stage4", "stage5"] if k in grouped]
   return {
       "title": "NVIDIA Dynamo + SGLang (v0.5.10 Day-0 Scaffolding, 8× B200): Stage 1 → 5 Pareto Frontier",
-      "subtitle": "DeepSeek-V4.1-Flash (NVFP4 + FP8 KV + 5-tok DSpark MTP, Stage 4 SGLang HiCache DRAM + Stage 5 Mooncake Lustre)",
+      "subtitle": "DeepSeek-V4.1-Flash (2× DEP=4 [TP=4, EP=4, DP=4], NVFP4 + flashmla_sparse/fa3 + Triton MoE + 5-tok DSpark MTP, Stage 4 HiCache DRAM + Stage 5 Mooncake Lustre, c=2..128)",
       "stages": [grouped[k] for k in order],
       "x_meta": {
-          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 160, "step": 20, "higherBetter": True},
+          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 240, "step": 40, "higherBetter": True},
+          "dec_int_p90": {"label": "P90 Decode Interactivity (1000 / P90 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 350, "step": 50, "higherBetter": True},
+          "dec_int_med": {"label": "Median Decode Interactivity (1000 / P50 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 380, "step": 50, "higherBetter": True},
           "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 70, "step": 10, "higherBetter": False},
           "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 45, "step": 5, "higherBetter": False},
           "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 25000, "step": 5000, "higherBetter": False},
       },
       "y_meta": {
-          "out_tput_chip": {"label": "Output Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 360},
-          "out_tput_pool": {"label": "Pool Output Throughput (tok/s — 8× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 2800},
-          "tot_tput_chip": {"label": "Total Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 60000},
-          "tot_tput_pool": {"label": "Pool Total Throughput (tok/s — 8× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 480000},
+          "out_tput_chip": {"label": "Output Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 600},
+          "out_tput_pool": {"label": "Pool Output Throughput (tok/s — 8× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 4800},
+          "tot_tput_chip": {"label": "Total Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 110000},
+          "tot_tput_pool": {"label": "Pool Total Throughput (tok/s — 8× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 900000},
       },
   }
 
@@ -488,14 +501,14 @@ def build_llmd_glm53_dataset():
           "Stage 4: vLLM Native OffloadingConnector (Host DRAM Tier)",
           "#a855f7",
           False,
-          "vLLM Native OffloadingConnector (CPUOffloadingSpec /dev/shm Host DRAM tier) achieves 251.6 ms P90 TTFT and 110.19 tok/s/user at c=16 over PCIe Gen5 DMA, and 159.16 tok/s/GPU at c=256.",
+          "vLLM Native OffloadingConnector (TieringOffloadingSpec Host DRAM tier + max-num-batched-tokens=16384) achieves 178.93 tok/s/user E2E (185.5 tok/s/user P90 decode, 105.0 ms P90 TTFT) at c=2 and 193.56 tok/s/GPU at c=256.",
       ),
       5: (
           "stage5",
           "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier",
           "#06b6d4",
           False,
-          "Mooncake distributed KV store backed by same-zone 1,000 MBps/TiB Managed Lustre shares KV cache globally across all nodes, reaching 203.27 tok/s/GPU (3,252.3 tok/s pool) and 883.3 ms P90 TTFT at c=256.",
+          "Tiered KV offloading backed by same-zone 1,000 MBps/TiB Managed Lustre reaches 203.27 tok/s/GPU (3,252.3 tok/s pool, 2,353.5 tok/s/GPU total) at c=256 and 183.96 tok/s/user E2E (189.8 tok/s/user P90 decode, 90.2 ms P90 TTFT) at c=2.",
       ),
   }
   grouped = {}
@@ -524,16 +537,20 @@ def build_llmd_glm53_dataset():
         "dec_tpot_ms": r["itl_p90_ms"],
         "e2e_lat_ms_tok": r["e2e_lat_per_tok_ms"],
         "e2e_int": r["e2e_interactivity_tok_s_u"],
+        "dec_int_p90": r.get("decode_interactivity_p90_tok_s_u", round(1000.0 / r["itl_p90_ms"], 2)),
+        "dec_int_med": r.get("decode_interactivity_med_tok_s_u", round(1000.0 / r["itl_p50_ms"], 2)),
         "kv_hit": f"{r['kv_hit_pct']:.2f}%",
         "note": note,
     })
   order = [k for k in ["stage1", "stage2", "stage3", "stage4", "stage5"] if k in grouped]
   return {
       "title": "zai-org/GLM-5.3 — llm-d + vLLM (v0.30.1rc1 Day-0 Scaffolding, 16× B200): Stage 1 → 5 Pareto Frontier",
-      "subtitle": "GLM-5.3 (743B MoE / 39B Active, FP8 + 5-tok MTP, Stage 4 vLLM Native DRAM OffloadingConnector + Stage 5 Mooncake Lustre)",
+      "subtitle": "GLM-5.3 (743B MoE / 39B Active, 2× TP=8, FP8 + FLASHINFER_MLA_SPARSE + 5-tok MTP + max-num-batched-tokens=16384, Stage 4 Host DRAM + Stage 5 Lustre)",
       "stages": [grouped[k] for k in order],
       "x_meta": {
-          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 120, "step": 20, "higherBetter": True},
+          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 200, "step": 25, "higherBetter": True},
+          "dec_int_p90": {"label": "P90 Decode Interactivity (1000 / P90 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 210, "step": 30, "higherBetter": True},
+          "dec_int_med": {"label": "Median Decode Interactivity (1000 / P50 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 230, "step": 30, "higherBetter": True},
           "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 140, "step": 20, "higherBetter": False},
           "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 90, "step": 15, "higherBetter": False},
           "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 16000, "step": 4000, "higherBetter": False},
@@ -559,35 +576,35 @@ def build_dynamo_glm53_dataset():
           "Stage 1: Naive L7 Round-Robin (Baseline)",
           "#f43f5e",
           True,
-          "Stateless L7 round-robin splits multi-turn sessions across 2× (TP=8, EP=8, DP=8) = 16× B200 SGLang workers without prefix affinity (1.8%–28.9% KV hit rate, 9,421.6 ms P90 TTFT at c=256).",
+          "Stateless L7 round-robin splits multi-turn sessions across 2× DEP=8 (TP=8, EP=8, DP=8 = 16× B200) SGLang workers without prefix affinity (14.2%–59.2% KV hit rate, 73.26 tok/s/GPU at c=256).",
       ),
       2: (
           "stage2",
           "Stage 2: Dynamo KV-Cache-Aware Routing (Colocated P/D)",
           "#10b981",
           False,
-          "Dynamo prefix-aware routing pins multi-turn sessions to the TP=8, EP=8 worker holding cached prefix blocks (55.7%–77.2% KV hit rate, +83.3% output throughput at c=64).",
+          "Dynamo prefix-aware routing pins multi-turn sessions to the DEP=8 worker holding cached prefix blocks (51.9%–76.1% KV hit rate, 97.38 tok/s/GPU at c=256).",
       ),
       3: (
           "stage3",
           "Stage 3: Dynamo Disaggregated P/D + KV Routing (HBM Only)",
           "#f59e0b",
           False,
-          "Mooncake RDMA 1P1D disaggregation isolates prefill bursts from decode steps across 16× B200 GPUs (74.7%–82.8% KV hit rate, 101.60 tok/s/GPU at c=256).",
+          "Mooncake RDMA 1P1D disaggregation isolates prefill bursts from decode steps across 16× B200 GPUs (110.58 tok/s/user E2E & 117.0 tok/s/user P90 decode at c=2, 107.14 tok/s/GPU at c=256).",
       ),
       4: (
           "stage4",
-          "Stage 4: SGLang HiCache Host DRAM Tier (--hicache-ratio 2.0)",
+          "Stage 4: SGLang HiCache Host DRAM Tier (--hicache-ratio 1.1)",
           "#a855f7",
           False,
-          "SGLang HiRadixCache + DSAIndexerPoolHost (--hicache-mem-layout page_first --hicache-io-backend kernel) tiers KV + DSA indexer pages to pinned Host DRAM over PCIe Gen5 (94.3%–99.0% KV hit rate, 359.9 ms P90 TTFT at c=16, 109.22 tok/s/GPU at c=256).",
+          "SGLang HiRadixCache + DSAIndexerPoolHost (--hicache-mem-layout page_first --hicache-io-backend kernel + cutedsl + dp-lm-head) achieves 110.89 tok/s/user E2E (117.0 tok/s/user P90 decode, 244.3 ms P90 TTFT) at c=2 and 113.92 tok/s/GPU at c=256.",
       ),
       5: (
           "stage5",
           "Stage 5: Mooncake + 1,000 MBps/TiB Lustre KV Tier",
           "#06b6d4",
           False,
-          "Mooncake distributed KV store (--hicache-storage-backend mooncake) backed by same-zone 1,000 MBps/TiB Managed Lustre reaches 133.96 tok/s/GPU (2,143.3 tok/s pool, +134.4% vs Stage 1) at c=256 and 85.59 tok/s/user (357.3 ms P90 TTFT) at c=16.",
+          "Mooncake distributed KV store + Same-Zone 1,000 MBps/TiB Managed Lustre reaches 133.96 tok/s/GPU (2,143.3 tok/s pool, 1,787.9 tok/s/GPU total) at c=256, 88.26 tok/s/user E2E at c=8, and 110.38 tok/s/user E2E (116.5 tok/s/user P90 decode) at c=2.",
       ),
   }
   grouped = {}
@@ -616,25 +633,29 @@ def build_dynamo_glm53_dataset():
         "dec_tpot_ms": r["itl_p90_ms"],
         "e2e_lat_ms_tok": r["e2e_lat_per_tok_ms"],
         "e2e_int": r["e2e_interactivity_tok_s_u"],
+        "dec_int_p90": r.get("decode_interactivity_p90_tok_s_u", round(1000.0 / r["itl_p90_ms"], 2)),
+        "dec_int_med": r.get("decode_interactivity_med_tok_s_u", round(1000.0 / r["itl_p50_ms"], 2)),
         "kv_hit": f"{r['kv_hit_pct']:.2f}%",
         "note": note,
     })
   order = [k for k in ["stage1", "stage2", "stage3", "stage4", "stage5"] if k in grouped]
   return {
       "title": "zai-org/GLM-5.3 — NVIDIA Dynamo + SGLang (v0.5.10 Day-0 Scaffolding, 16× B200): Stage 1 → 5 Pareto Frontier",
-      "subtitle": "GLM-5.3 (743B MoE / 39B Active, FP8 + DeepEP + EAGLE MTP, Stage 4 SGLang HiCache DRAM + Stage 5 Mooncake Lustre)",
+      "subtitle": "GLM-5.3 (743B MoE / 39B Active, 2× DEP=8 [TP=8, EP=8, DP=8], FP8 + DeepEP + cutedsl + dp-lm-head + EAGLE MTP, Stage 4 HiCache DRAM + Stage 5 Mooncake Lustre)",
       "stages": [grouped[k] for k in order],
       "x_meta": {
-          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 100, "step": 20, "higherBetter": True},
-          "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 140, "step": 20, "higherBetter": False},
-          "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 100, "step": 20, "higherBetter": False},
-          "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 10000, "step": 2000, "higherBetter": False},
+          "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 120, "step": 20, "higherBetter": True},
+          "dec_int_p90": {"label": "P90 Decode Interactivity (1000 / P90 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 130, "step": 25, "higherBetter": True},
+          "dec_int_med": {"label": "Median Decode Interactivity (1000 / P50 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 140, "step": 25, "higherBetter": True},
+          "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 100, "step": 20, "higherBetter": False},
+          "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 80, "step": 20, "higherBetter": False},
+          "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 8000, "step": 2000, "higherBetter": False},
       },
       "y_meta": {
           "out_tput_chip": {"label": "Output Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 150},
           "out_tput_pool": {"label": "Pool Output Throughput (tok/s — 16× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 2400},
-          "tot_tput_chip": {"label": "Total Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 1500},
-          "tot_tput_pool": {"label": "Pool Total Throughput (tok/s — 16× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 24000},
+          "tot_tput_chip": {"label": "Total Throughput / GPU (tok/s/GPU)  [↑ Higher is Better]", "unit": "tok/s/GPU", "max": 2000},
+          "tot_tput_pool": {"label": "Pool Total Throughput (tok/s — 16× B200)  [↑ Higher is Better]", "unit": "tok/s", "max": 32000},
       },
   }
 
@@ -708,6 +729,8 @@ def build_llmd_kimik3_dataset():
         "dec_tpot_ms": r["itl_p90_ms"],
         "e2e_lat_ms_tok": r["p90_e2e_tok_lat_ms"],
         "e2e_int": r["interactivity_p90_tok_s_user"],
+        "dec_int_p90": round(1000.0 / r["itl_p90_ms"], 2),
+        "dec_int_med": round(1000.0 / r.get("itl_p50_ms", r["itl_p90_ms"] * 0.85), 2),
         "kv_hit": f"{r['kv_cache_hit_pct']:.2f}%",
         "note": note,
     })
@@ -718,6 +741,8 @@ def build_llmd_kimik3_dataset():
       "stages": [grouped[k] for k in order],
       "x_meta": {
           "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 180, "step": 30, "higherBetter": True},
+          "dec_int_p90": {"label": "P90 Decode Interactivity (1000 / P90 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 200, "step": 25, "higherBetter": True},
+          "dec_int_med": {"label": "Median Decode Interactivity (1000 / P50 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 220, "step": 25, "higherBetter": True},
           "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 120, "step": 20, "higherBetter": False},
           "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 90, "step": 15, "higherBetter": False},
           "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 15000, "step": 3000, "higherBetter": False},
@@ -800,6 +825,8 @@ def build_dynamo_kimik3_dataset():
         "dec_tpot_ms": r["itl_p90_ms"],
         "e2e_lat_ms_tok": r["p90_e2e_tok_lat_ms"],
         "e2e_int": r["interactivity_p90_tok_s_user"],
+        "dec_int_p90": round(1000.0 / r["itl_p90_ms"], 2),
+        "dec_int_med": round(1000.0 / r.get("itl_p50_ms", r["itl_p90_ms"] * 0.85), 2),
         "kv_hit": f"{r['kv_cache_hit_pct']:.2f}%",
         "note": note,
     })
@@ -810,6 +837,8 @@ def build_dynamo_kimik3_dataset():
       "stages": [grouped[k] for k in order],
       "x_meta": {
           "e2e_int": {"label": "P90 E2E Normalized Interactivity (tok/s/user — InferenceX X-Axis)  [→ Higher is Better]", "unit": "", "max": 160, "step": 20, "higherBetter": True},
+          "dec_int_p90": {"label": "P90 Decode Interactivity (1000 / P90 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 240, "step": 30, "higherBetter": True},
+          "dec_int_med": {"label": "Median Decode Interactivity (1000 / P50 ITL, tok/s/user)  [→ Higher is Better]", "unit": "", "max": 270, "step": 30, "higherBetter": True},
           "e2e_lat_ms_tok": {"label": "P90 E2E Latency per Output Token (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 250, "step": 50, "higherBetter": False},
           "dec_tpot_ms": {"label": "P90 Decode Inter-Token Latency / TPOT (ms/tok)  [← Lower is Better]", "unit": "ms", "max": 60, "step": 10, "higherBetter": False},
           "p90_ttft_ms": {"label": "P90 Time to First Token — TTFT (ms)  [← Lower is Better]", "unit": "ms", "max": 20000, "step": 4000, "higherBetter": False},
